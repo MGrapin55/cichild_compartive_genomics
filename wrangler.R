@@ -1,14 +1,29 @@
+# ==============================================================================
+# 1. SETUP & INITIALIZATION
+# ==============================================================================
+
 # Query NCBI SRA for genomic, paired-end runs from a list of species.
 # Install once if needed: install.packages("rentrez")
 
 library(rentrez)
 
-# One species name per line in species.txt
+# Define the target species names (one name per element)
 species <- c("Serranochromis robustus", "Metriaclima mbenji")
-#species <- trimws(readLines("path/to/species.txt", warn = FALSE))
+
+# Alternative: Read species names dynamically from an external text file
+# species <- trimws(readLines("path/to/species.txt", warn = FALSE))
+
+# Clean the vector by removing any empty or whitespace-only strings
 species <- species[nzchar(species)]
 
-# Retrieve every SRA search result in manageable pages.
+
+# ==============================================================================
+# 2. FUNCTIONS SECTION
+# ==============================================================================
+
+# Purpose: NCBI limits individual search returns. This function implements 
+# pagination using `retstart` and `retmax` inside a `while` loop to guarantee 
+# all matching SRA run IDs are fetched, even for large species datasets.
 search_sra_ids <- function(term, page_size = 500L) {
   first_page <- entrez_search(
     db = "sra",
@@ -41,7 +56,9 @@ search_sra_ids <- function(term, page_size = 500L) {
   ids
 }
 
-# Retrieve RunInfo in batches to avoid oversized requests.
+# Purpose: Prevents HTTP query errors by breaking large ID lists into smaller 
+# chunks (batches of 200), downloading their `runinfo` metadata in CSV format, 
+# and row-binding them together.
 fetch_runinfo <- function(ids, batch_size = 200L) {
   batches <- split(ids, ceiling(seq_along(ids) / batch_size))
   
@@ -58,18 +75,21 @@ fetch_runinfo <- function(ids, batch_size = 200L) {
   do.call(rbind, results)
 }
 
-# Return the first matching column name, ignoring capitalization.
+# Purpose: NCBI schema headers can vary in capitalization across different queries 
+# (e.g., `BioProject` vs `bioproject`). This helper safely finds the correct column 
+# name regardless of casing.
 find_column <- function(data, candidates) {
   matches <- match(tolower(candidates), tolower(names(data)))
   matches <- matches[!is.na(matches)]
   if (length(matches)) names(data)[matches[1]] else NULL
 }
 
-# Follow each BioProject's PubMed links to find citation metadata.
-# Follow each BioProject's PubMed links OR text-search PubMed if links are missing.
+# Purpose: Connects sequencing projects to published literature. It tries a direct 
+# database link first (`entrez_link`), and if that fails, executes a fallback text 
+# search on PubMed using the BioProject accession.
 linked_pubmed_ids <- function(project_accessions) {
   projects <- unique(project_accessions[!is.na(project_accessions) &
-                                          nzchar(project_accessions)])
+                                        nzchar(project_accessions)])
   
   setNames(lapply(projects, function(project) {
     project_search <- entrez_search(
@@ -101,8 +121,8 @@ linked_pubmed_ids <- function(project_accessions) {
   }), projects)
 }
 
-
-# Fetch author names and publication years for PubMed IDs.
+# Purpose: Downloads article metadata in raw XML format, parses out authors and 
+# publication years using `xml2`, and structures them into a clean tabular format.
 fetch_pubmed_metadata <- function(ids, batch_size = 100L) {
   ids <- unique(ids[!is.na(ids) & nzchar(ids)])
   if (length(ids) == 0L) {
@@ -116,14 +136,12 @@ fetch_pubmed_metadata <- function(ids, batch_size = 100L) {
   
   batches <- split(ids, ceiling(seq_along(ids) / batch_size))
   articles <- unlist(lapply(batches, function(batch) {
-    # CHANGE: Set parsed = FALSE to get a raw text string
     xml_text <- entrez_fetch(
       db = "pubmed",
       id = batch,
       rettype = "xml",
       parsed = FALSE
     )
-    # Convert the raw text string into a native xml2 document object
     document <- xml2::read_xml(xml_text)
     xml2::xml_find_all(document, ".//PubmedArticle")
   }), recursive = FALSE)
@@ -181,6 +199,10 @@ fetch_pubmed_metadata <- function(ids, batch_size = 100L) {
 }
 
 
+# ==============================================================================
+# 3. MAIN PROCESSING SECTION
+# ==============================================================================
+
 all_runs <- list()
 
 for (sp in species) {
@@ -225,6 +247,7 @@ for (sp in species) {
   
   project_links <- linked_pubmed_ids(projects)
   missing_pubmed <- which(is.na(pubmed_ids))
+  
   # Keep one citation per run to match the existing PUBMED_ID output column.
   for (row in missing_pubmed) {
     project <- projects[row]
