@@ -4,9 +4,42 @@
 library(rentrez)
 
 # One species name per line in species.txt
-species <- c("Serranochromis robustus")
+species <- c("Serranochromis robustus", "Metriaclima mbenji")
 #species <- trimws(readLines("path/to/species.txt", warn = FALSE))
 species <- species[nzchar(species)]
+
+# Retrieve every SRA search result in manageable pages.
+search_sra_ids <- function(term, page_size = 500L) {
+  first_page <- entrez_search(
+    db = "sra",
+    term = term,
+    retmax = page_size,
+    retstart = 0L
+  )
+  ids <- first_page$ids
+  
+  while (length(ids) < first_page$count) {
+    next_page <- entrez_search(
+      db = "sra",
+      term = term,
+      retmax = page_size,
+      retstart = length(ids)
+    )
+    
+    if (length(next_page$ids) == 0L) {
+      stop(
+        sprintf(
+          "SRA search stopped after %s of %s results.",
+          length(ids), first_page$count
+        )
+      )
+    }
+    
+    ids <- c(ids, next_page$ids)
+  }
+  
+  ids
+}
 
 # Retrieve RunInfo in batches to avoid oversized requests.
 fetch_runinfo <- function(ids, batch_size = 200L) {
@@ -32,6 +65,122 @@ find_column <- function(data, candidates) {
   if (length(matches)) names(data)[matches[1]] else NULL
 }
 
+# Follow each BioProject's PubMed links to find citation metadata.
+# Follow each BioProject's PubMed links OR text-search PubMed if links are missing.
+linked_pubmed_ids <- function(project_accessions) {
+  projects <- unique(project_accessions[!is.na(project_accessions) &
+                                          nzchar(project_accessions)])
+  
+  setNames(lapply(projects, function(project) {
+    project_search <- entrez_search(
+      db = "bioproject",
+      term = project,
+      retmax = 1L
+    )
+    if (length(project_search$ids) == 0L) return(character())
+    
+    # Strategy 1: Try the direct database-to-database link (elink)
+    links <- entrez_link(
+      dbfrom = "bioproject",
+      id = project_search$ids[1],
+      db = "pubmed"
+    )
+    linked_ids <- as.character(unlist(links$links, use.names = FALSE))
+    
+    # Strategy 2: Fallback to text searching PubMed if elink is empty
+    if (length(linked_ids) == 0L) {
+      fallback_search <- entrez_search(
+        db = "pubmed",
+        term = paste0(project, "[ALL]"),
+        retmax = 1L
+      )
+      linked_ids <- fallback_search$ids
+    }
+    
+    linked_ids
+  }), projects)
+}
+
+
+# Fetch author names and publication years for PubMed IDs.
+fetch_pubmed_metadata <- function(ids, batch_size = 100L) {
+  ids <- unique(ids[!is.na(ids) & nzchar(ids)])
+  if (length(ids) == 0L) {
+    return(data.frame(
+      PUBMED_ID = character(),
+      AUTHORS = character(),
+      YEAR = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  batches <- split(ids, ceiling(seq_along(ids) / batch_size))
+  articles <- unlist(lapply(batches, function(batch) {
+    # CHANGE: Set parsed = FALSE to get a raw text string
+    xml_text <- entrez_fetch(
+      db = "pubmed",
+      id = batch,
+      rettype = "xml",
+      parsed = FALSE
+    )
+    # Convert the raw text string into a native xml2 document object
+    document <- xml2::read_xml(xml_text)
+    xml2::xml_find_all(document, ".//PubmedArticle")
+  }), recursive = FALSE)
+  
+  if (length(articles) == 0L) {
+    return(data.frame(
+      PUBMED_ID = character(),
+      AUTHORS = character(),
+      YEAR = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  xml_value <- function(node, xpath) {
+    values <- xml2::xml_find_all(node, xpath)
+    if (length(values) == 0L) NA_character_ else xml2::xml_text(values[[1]])
+  }
+  
+  get_author <- function(author) {
+    collective <- xml_value(author, "./CollectiveName")
+    if (!is.na(collective) && nzchar(collective)) return(collective)
+    
+    last_name <- xml_value(author, "./LastName")
+    initials <- xml_value(author, "./Initials")
+    if (is.na(initials)) initials <- xml_value(author, "./ForeName")
+    if (is.na(last_name)) return(NA_character_)
+    if (is.na(initials)) last_name else paste(last_name, initials)
+  }
+  
+  rows <- lapply(articles, function(article) {
+    author_nodes <- xml2::xml_find_all(
+      article,
+      ".//MedlineCitation/Article/AuthorList/Author"
+    )
+    authors <- vapply(author_nodes, get_author, character(1))
+    authors <- authors[!is.na(authors) & nzchar(authors)]
+    
+    year <- xml_value(article, ".//JournalIssue/PubDate/Year")
+    if (is.na(year)) year <- xml_value(article, ".//ArticleDate/Year")
+    if (is.na(year)) {
+      medline_date <- xml_value(article, ".//JournalIssue/PubDate/MedlineDate")
+      year_match <- regmatches(medline_date, regexpr("[0-9]{4}", medline_date))
+      year <- if (length(year_match)) year_match else NA_character_
+    }
+    
+    data.frame(
+      PUBMED_ID = xml_value(article, ".//MedlineCitation/PMID"),
+      AUTHORS = if (length(authors)) paste(authors, collapse = "; ") else NA_character_,
+      YEAR = suppressWarnings(as.integer(year)),
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  do.call(rbind, rows)
+}
+
+
 all_runs <- list()
 
 for (sp in species) {
@@ -40,24 +189,10 @@ for (sp in species) {
     gsub('"', '\\"', sp)
   )
   
-  search <- entrez_search(
-    db = "sra",
-    term = query,
-    #retmax = 100000
-  )
+  sra_ids <- search_sra_ids(query)
+  if (length(sra_ids) == 0L) next
   
-  if (search$count > length(search$ids)) {
-    stop(
-      sprintf(
-        "The result limit was reached for %s (%s of %s records retrieved).",
-        sp, length(search$ids), search$count
-      )
-    )
-  }
-  
-  if (length(search$ids) == 0L) next
-  
-  runinfo <- fetch_runinfo(search$ids)
+  runinfo <- fetch_runinfo(sra_ids)
   
   # Confirm the requested criteria using the returned run metadata.
   source_col <- find_column(runinfo, "LibrarySource")
@@ -84,10 +219,38 @@ for (sp in species) {
     if (is.null(column)) rep(default, nrow(runinfo)) else runinfo[[column]]
   }
   
+  projects <- as.character(get_value(project_col))
+  pubmed_ids <- as.character(get_value(pubmed_col))
+  pubmed_ids[is.na(pubmed_ids) | !nzchar(trimws(pubmed_ids))] <- NA_character_
+  
+  project_links <- linked_pubmed_ids(projects)
+  missing_pubmed <- which(is.na(pubmed_ids))
+  # Keep one citation per run to match the existing PUBMED_ID output column.
+  for (row in missing_pubmed) {
+    project <- projects[row]
+    if (!is.na(project) && project %in% names(project_links)) {
+      linked_ids <- project_links[[project]]
+      if (length(linked_ids)) pubmed_ids[row] <- linked_ids[1]
+    }
+  }
+  
+  publication_metadata <- fetch_pubmed_metadata(pubmed_ids)
+  metadata_rows <- match(pubmed_ids, publication_metadata$PUBMED_ID)
+  metadata_authors <- publication_metadata$AUTHORS[metadata_rows]
+  metadata_years <- publication_metadata$YEAR[metadata_rows]
+  
+  authors <- as.character(get_value(authors_col))
+  missing_authors <- is.na(authors) | !nzchar(trimws(authors))
+  authors[missing_authors] <- metadata_authors[missing_authors]
+  
+  years <- suppressWarnings(as.integer(get_value(year_col)))
+  missing_years <- is.na(years)
+  years[missing_years] <- metadata_years[missing_years]
+  
   all_runs[[sp]] <- data.frame(
-    PUBMED_ID = suppressWarnings(as.integer(get_value(pubmed_col))),
-    AUTHORS = as.character(get_value(authors_col)),
-    YEAR = suppressWarnings(as.integer(get_value(year_col))),
+    PUBMED_ID = suppressWarnings(as.integer(pubmed_ids)),
+    AUTHORS = authors,
+    YEAR = years,
     # SRA study accessions (for example, SRP...) are alphanumeric.
     STUDY = as.character(get_value(study_col)),
     SPECIES = as.character(get_value(organism_col, sp)),
