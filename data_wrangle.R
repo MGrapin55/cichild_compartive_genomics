@@ -82,8 +82,7 @@ remove_values <- c("Astatotilapia burtoni",
 bioproject_remove_samples <- bioproject_species_unique %>% 
   filter(!Organism %in% remove_values)
 
-
 #Generate file with just accession numbers
 
-accession_number <- bioproject_species_unique$Run
+accession_number <- bioproject_remove_samples$Run
 writeLines(as.character(accession_number), "C:/Users/crazy/Desktop/Moore Lab/Code/cichild_compartive_genomics-main/sra_accession_number.txt")
