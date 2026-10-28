@@ -43,6 +43,46 @@ bioproject_species_unique <- bioproject %>%
   slice_head(n = 1) %>%
   ungroup()
 
+#Scan for overlap with species that we have in house and remove from Malinsky dataset if included in ours
+#Species in house: 
+# Astatotilapia burtoni
+# Astatotilapia calliptera
+# Aulonocara baenschi Nkhomo Reef "Yellow Regal"
+# Aulonocara jacobfreibergi 
+# Aulonocara koningsi Mbenji "Blue Regal"
+# Champsochromis caeruleus "Malawi Trout"
+# Copadichromis trewavasae
+# Cynotilapia zebroides Cobwe "Orange Black"
+# Hemitilapia oxyrhynchus
+# Labeotropheus fuelleborni Chilumba
+# Labeotropheus fulleborni 
+# Labeotropheus trewavasae "Mpanga Red"
+# Labeotropheus trewavasae Thumbi West 
+# Labidochromis caeruleus Nkhata Bay
+# Labidochromis sp. "Hongi"
+# Metriaclima aurora
+
+remove_values <- c("Astatotilapia burtoni",
+                   "Astatotilapia calliptera",
+                   "Aulonocara baenschi Nkhomo Reef 'Yellow Regal'",
+                   "Aulonocara jacobfreibergi", 
+                   "Aulonocara koningsi Mbenji 'Blue Regal'",
+                   "Champsochromis caeruleus 'Malawi Trout'",
+                   "Copadichromis trewavasae",
+                   "Cynotilapia zebroides Cobwe 'Orange Black'",
+                   "Hemitilapia oxyrhynchus",
+                   "Labeotropheus fuelleborni Chilumba",
+                   "Labeotropheus fulleborni",
+                   "Labeotropheus trewavasae 'Mpanga Red'",
+                   "Labeotropheus trewavasae Thumbi West", 
+                   "Labidochromis caeruleus Nkhata Bay",
+                   "Labidochromis sp. 'Hongi'",
+                   "Metriaclima aurora")
+
+bioproject_remove_samples <- bioproject_species_unique %>% 
+  filter(!Organism %in% remove_values)
+
+
 #Generate file with just accession numbers
 
 accession_number <- bioproject_species_unique$Run
