@@ -1,1 +1,5 @@
 NCBI_wrangling.md
+*.tsv
+*.csv
+*.pdf
+*.txt
